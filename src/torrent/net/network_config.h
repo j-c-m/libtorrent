@@ -15,16 +15,19 @@ public:
   static constexpr int iptos_throughput  = IPTOS_THROUGHPUT;
   static constexpr int iptos_reliability = IPTOS_RELIABILITY;
 
+  // Independent flags (restored 0.15.7 ConnectionManager layout). require is
+  // (1<<2), not allow|try; handshake ORs require into allow/try paths so
+  // require alone still accepts inbound MSE and forces outbound PE.
   static constexpr uint32_t encryption_none             = 0;
-  static constexpr uint32_t encryption_allow_incoming   = 0x1;
-  static constexpr uint32_t encryption_try_outgoing     = 0x2;
-  static constexpr uint32_t encryption_require          = 0x3;
-  static constexpr uint32_t encryption_require_RC4      = 0x4;
-  static constexpr uint32_t encryption_enable_retry     = 0x8;
-  static constexpr uint32_t encryption_prefer_plaintext = 0x10;
+  static constexpr uint32_t encryption_allow_incoming   = (1 << 0);
+  static constexpr uint32_t encryption_try_outgoing     = (1 << 1);
+  static constexpr uint32_t encryption_require          = (1 << 2);
+  static constexpr uint32_t encryption_require_RC4      = (1 << 3);
+  static constexpr uint32_t encryption_enable_retry     = (1 << 4);
+  static constexpr uint32_t encryption_prefer_plaintext = (1 << 5);
   // Internal to libtorrent.
-  static constexpr uint32_t encryption_use_proxy        = 0x20;
-  static constexpr uint32_t encryption_retrying         = 0x40;
+  static constexpr uint32_t encryption_use_proxy        = (1 << 6);
+  static constexpr uint32_t encryption_retrying         = (1 << 7);
 
   NetworkConfig();
 
