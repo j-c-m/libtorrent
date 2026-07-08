@@ -192,14 +192,33 @@ Handshake::destroy_connection(bool use_socket_manager) {
 
 int
 Handshake::retry_options() {
-  uint32_t options = m_encryption.options() & ~net::NetworkConfig::encryption_enable_retry;
+  using NC = net::NetworkConfig;
 
-  if (m_encryption.retry() == HandshakeEncryption::RETRY_PLAIN)
-    options &= ~net::NetworkConfig::encryption_try_outgoing;
-  else if (m_encryption.retry() == HandshakeEncryption::RETRY_ENCRYPTED)
-    options |= net::NetworkConfig::encryption_try_outgoing;
-  else
+  int options = m_encryption.options();
+
+  switch (m_encryption.retry()) {
+  case HandshakeEncryption::RETRY_PLAIN:
+    options &= ~NC::encryption_try_outgoing;
+    options &= ~NC::encryption_enable_retry;
+    break;
+
+  case HandshakeEncryption::RETRY_ENCRYPTED:
+    options |= NC::encryption_try_outgoing;
+    options &= ~NC::encryption_enable_retry;
+    break;
+
+  case HandshakeEncryption::RETRY_CRYPTO_BOTH:
+    options |= NC::encryption_try_outgoing;
+    // Drop prefer so crypto_provide_bits offers plain|RC4 on this hop.
+    options &= ~NC::encryption_prefer_plaintext;
+    // Keep enable_retry when bare-BT fallback is still possible.
+    if ((options & NC::encryption_require) == NC::encryption_require)
+      options &= ~NC::encryption_enable_retry;
+    break;
+
+  default:
     throw internal_error("Invalid retry type.");
+  }
 
   return options;
 }
@@ -423,6 +442,9 @@ Handshake::read_encryption_negotiation() {
 
     if ((m_encryption.options() & net::NetworkConfig::encryption_require_RC4) && (m_encryption.crypto() != HandshakeEncryption::crypto_rc4))
       throw handshake_error(ConnectionManager::handshake_failed, e_handshake_invalid_encryption);
+
+    // Peer accepted a crypto method; never escalate provide after this.
+    m_encryption.set_retry(HandshakeEncryption::RETRY_NONE);
   }
 
   if (!m_incoming) {
@@ -1056,10 +1078,8 @@ Handshake::prepare_enc_negotiation() {
   HandshakeEncryption::copy_vc(m_writeBuffer.end());
   m_writeBuffer.move_end(HandshakeEncryption::vc_length);
 
-  if (m_encryption.options() & net::NetworkConfig::encryption_require_RC4)
-    m_writeBuffer.write_32(HandshakeEncryption::crypto_rc4);
-  else
-    m_writeBuffer.write_32(HandshakeEncryption::crypto_plain | HandshakeEncryption::crypto_rc4);
+  const uint32_t provide = m_encryption.crypto_provide_bits();
+  m_writeBuffer.write_32(provide);
 
   m_writeBuffer.write_16(0);
   m_writeBuffer.write_16(handshake_size);
@@ -1067,6 +1087,13 @@ Handshake::prepare_enc_negotiation() {
 
   // write and encrypt BT handshake as initial payload IA
   prepare_handshake();
+
+  // Arm provide-escalation for outgoing plain-first (always, not gated on
+  // enable_retry; !m_incoming is belt-and-suspenders for outgoing-only).
+  if (!m_incoming && provide == HandshakeEncryption::crypto_plain)
+    m_encryption.set_retry(HandshakeEncryption::RETRY_CRYPTO_BOTH);
+  else
+    m_encryption.set_retry(HandshakeEncryption::RETRY_NONE);
 }
 
 void

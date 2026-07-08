@@ -3,6 +3,7 @@
 #include "handshake_manager.h"
 
 #include "handshake.h"
+#include "handshake_encryption.h"
 #include "manager.h"
 #include "peer_connection_base.h"
 #include "download/download_main.h"
@@ -294,7 +295,16 @@ HandshakeManager::receive_failed(Handshake* ptr, int message, int error) {
     int retry_options = handshake->retry_options() | net::NetworkConfig::encryption_retrying;
     DownloadMain* download = handshake->download();
 
-    LT_LOG_SA(sa, "Retrying %s.", retry_options & net::NetworkConfig::encryption_try_outgoing ? "encrypted" : "plaintext");
+    if (download == nullptr) {
+      LT_LOG_SA(sa, "Skip retry: no download.", 0);
+      return;
+    }
+
+    if (handshake->encryption()->retry() == HandshakeEncryption::RETRY_CRYPTO_BOTH) {
+      LT_LOG_SA(sa, "Retrying PE with crypto_provide plain|RC4.", 0);
+    } else {
+      LT_LOG_SA(sa, "Retrying %s.", retry_options & net::NetworkConfig::encryption_try_outgoing ? "encrypted" : "plaintext");
+    }
 
     create_outgoing(sa, download, retry_options);
   }

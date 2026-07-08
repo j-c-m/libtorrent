@@ -1,6 +1,7 @@
 #ifndef LIBTORRENT_PROTOCOL_HANDSHAKE_ENCRYPTION_H
 #define LIBTORRENT_PROTOCOL_HANDSHAKE_ENCRYPTION_H
 
+#include <cstdint>
 #include <cstring>
 #include <memory>
 
@@ -16,6 +17,7 @@ public:
     RETRY_NONE,
     RETRY_PLAIN,
     RETRY_ENCRYPTED,
+    RETRY_CRYPTO_BOTH, // retry PE advertising plain|RC4
   };
 
   static constexpr int           crypto_plain = 1;
@@ -47,6 +49,8 @@ public:
   void                set_retry(Retry val)                         { m_retry = val; }
 
   bool                should_retry() const;
+
+  uint32_t            crypto_provide_bits() const;
 
   const char*         sync() const                                 { return m_sync; }
   unsigned int        sync_length() const                          { return m_syncLength; }

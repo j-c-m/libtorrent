@@ -361,16 +361,24 @@ NetworkConfig::set_proxy_address(const sockaddr* sa) {
 }
 
 
+namespace {
+
+constexpr uint32_t encryption_internal_mask =
+  NetworkConfig::encryption_use_proxy |
+  NetworkConfig::encryption_retrying;
+
+} // namespace
+
 uint32_t
 NetworkConfig::encryption_options() const {
   auto guard = lock_guard();
-  return m_encryption_options;
+  return m_encryption_options & ~encryption_internal_mask;
 }
 
 void
 NetworkConfig::set_encryption_options(uint32_t opts) {
   auto guard = lock_guard();
-  m_encryption_options = opts;
+  m_encryption_options = opts & ~encryption_internal_mask;
 }
 
 int

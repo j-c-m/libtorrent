@@ -24,11 +24,33 @@ const unsigned char HandshakeEncryption::vc_data[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 bool
 HandshakeEncryption::should_retry() const {
-  return (m_options & net::NetworkConfig::encryption_enable_retry) != 0 && m_retry != HandshakeEncryption::RETRY_NONE;
+  if (m_retry == RETRY_NONE)
+    return false;
+
+  // Provide-escalation (plain → plain|RC4) is independent of enable_retry.
+  if (m_retry == RETRY_CRYPTO_BOTH)
+    return true;
+
+  return (m_options & net::NetworkConfig::encryption_enable_retry) != 0;
 }
 
 HandshakeEncryption::HandshakeEncryption(int options) :
     m_options(options) {
+}
+
+uint32_t
+HandshakeEncryption::crypto_provide_bits() const {
+  using NC = net::NetworkConfig;
+
+  if (m_options & NC::encryption_require_RC4)
+    return crypto_rc4;
+
+  // prefer_plaintext: plain first. RETRY_CRYPTO_BOTH clears this flag so the
+  // escalate hop falls through to plain|RC4.
+  if (m_options & NC::encryption_prefer_plaintext)
+    return crypto_plain;
+
+  return crypto_plain | crypto_rc4;
 }
 
 bool
