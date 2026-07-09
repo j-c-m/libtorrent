@@ -19,12 +19,16 @@ namespace torrent {
 
 namespace {
 
+// IPV6_V6ONLY must be set before bind on Linux; after bind, setsockopt returns
+// EINVAL. Apply it via fd_flag_v6only in fd_open when requested.
 std::tuple<int, int>
-listen_fd_open(const sockaddr* bind_address) {
+listen_fd_open(const sockaddr* bind_address, bool block_ipv4in6) {
   fd_flags open_flags = fd_flag_nonblock | fd_flag_reuse_address;
 
   if (bind_address->sa_family == AF_INET)
     open_flags |= fd_flag_v4only;
+  else if (block_ipv4in6 && bind_address->sa_family == AF_INET6)
+    open_flags |= fd_flag_v6only;
 
   int stream_fd = fd_open(fd_flag_stream | open_flags);
 
@@ -42,10 +46,10 @@ listen_fd_open(const sockaddr* bind_address) {
 }
 
 std::tuple<int, uint16_t>
-listen_open_range(uint16_t first, uint16_t last, const sockaddr* bind_address) {
+listen_open_range(uint16_t first, uint16_t last, const sockaddr* bind_address, bool block_ipv4in6) {
   sa_unique_ptr try_address = sa_copy(bind_address);
 
-  auto [stream_fd, datagram_fd] = listen_fd_open(bind_address);
+  auto [stream_fd, datagram_fd] = listen_fd_open(bind_address, block_ipv4in6);
 
   do {
     sa_set_port(try_address.get(), first);
@@ -60,7 +64,7 @@ listen_open_range(uint16_t first, uint16_t last, const sockaddr* bind_address) {
       fd_close(stream_fd);
       fd_close(datagram_fd);
 
-      std::tie(stream_fd, datagram_fd) = listen_fd_open(bind_address);
+      std::tie(stream_fd, datagram_fd) = listen_fd_open(bind_address, block_ipv4in6);
       continue;
     }
 
@@ -87,17 +91,11 @@ Listen::open_single(Listen* listen, const sockaddr* bind_address, uint16_t first
   if (bind_address->sa_family != AF_INET && bind_address->sa_family != AF_INET6)
     throw input_error("Listening socket must be inet or inet6 address type");
 
-  auto [listen_fd, listen_port] = listen_open_range(first, last, bind_address);
+  auto [listen_fd, listen_port] = listen_open_range(first, last, bind_address, block_ipv4in6);
 
   if (listen_fd == -1) {
     LT_LOG("failed to find a suitable listen port : last error : %s", std::strerror(errno));
     return false;
-  }
-
-  if (block_ipv4in6 && bind_address->sa_family == AF_INET6 && !fd_set_v6only(listen_fd, true)) {
-    fd_close(listen_fd);
-    LT_LOG("failed to set IPV6_V6ONLY on socket : %s", std::strerror(errno));
-    throw resource_error("Could not set IPV6_V6ONLY on socket: " + std::string(strerror(errno)));
   }
 
   if (!fd_listen(listen_fd, backlog)) {
@@ -135,14 +133,15 @@ Listen::open_both(Listen* listen_inet, Listen* listen_inet6,
       return false;
     }
 
-    std::tie(inet_fd, inet_port) = listen_open_range(first, last, bind_inet_address);
+    // IPv4 path ignores block_ipv4in6 (fd_flag_v4only only).
+    std::tie(inet_fd, inet_port) = listen_open_range(first, last, bind_inet_address, false);
 
     if (inet_fd == -1) {
       LT_LOG("Unable to find a suitable ipv4 listen port : last error : %s", std::strerror(errno));
       return false;
     }
 
-    std::tie(inet6_fd, inet6_port) = listen_open_range(inet_port, inet_port, bind_inet6_address);
+    std::tie(inet6_fd, inet6_port) = listen_open_range(inet_port, inet_port, bind_inet6_address, block_ipv4in6);
 
     if (inet6_fd != -1)
       break;
@@ -160,11 +159,6 @@ Listen::open_both(Listen* listen_inet, Listen* listen_inet6,
     if (!fd_listen(inet_fd, backlog)) {
       LT_LOG("failed to listen on ipv4 socket : %s", std::strerror(errno));
       throw resource_error("Could not listen on ipv4 socket: " + std::string(strerror(errno)));
-    }
-
-    if (block_ipv4in6 && !fd_set_v6only(inet6_fd, true)) {
-      LT_LOG("failed to set IPV6_V6ONLY on socket : %s", std::strerror(errno));
-      throw resource_error("Could not set IPV6_V6ONLY on socket: " + std::string(strerror(errno)));
     }
 
     if (!fd_listen(inet6_fd, backlog)) {
