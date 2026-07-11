@@ -52,6 +52,9 @@ HashQueue::push_back(ChunkHandle handle, HashQueueNode::id_type id, slot_done_ty
 
   base_type::push_back(HashQueueNode(id, hash_chunk, std::move(d)));
 
+  // Prefault/readahead before the disk thread walks the piece for SHA1.
+  base_type::back().call_willneed();
+
   thread_disk()->hash_check_queue()->push_back(hash_chunk);
   thread_disk()->interrupt();
 }
