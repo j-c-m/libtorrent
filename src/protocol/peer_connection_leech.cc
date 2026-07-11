@@ -589,31 +589,46 @@ PeerConnection<type>::event_write() {
 
 	[[fallthrough]];
       case ProtocolWrite::MSG:
-        if (!m_up->buffer()->consume(m_up->throttle()->node_used_unthrottled(write_stream_throws(m_up->buffer()->position(), m_up->buffer()->remaining()))))
-          return;
-
-        m_up->buffer()->reset();
-
-        if (m_up->last_command() == ProtocolBase::PIECE) {
-          // We're uploading a piece.
+        // Only coalesce when the buffer is exactly one header. Mixed control
+        // messages + header must use the normal MSG write first.
+        if (m_up->last_command() == ProtocolBase::PIECE &&
+            m_up->buffer()->remaining() == ProtocolBase::sizeof_piece) {
+          // Pure PIECE header: fall through to WRITE_PIECE for header+payload writev.
           load_up_chunk();
           m_up->set_state(ProtocolWrite::WRITE_PIECE);
 
-          // fall through to WRITE_PIECE case below
-
-        } else if (m_up->last_command() == ProtocolBase::EXTENSION_PROTOCOL) {
+        } else if (m_up->last_command() == ProtocolBase::EXTENSION_PROTOCOL &&
+                   m_up->buffer()->remaining() == ProtocolBase::sizeof_extension) {
+          // Pure extension header: WRITE_EXTENSION owns header+body writev.
           m_up->set_state(ProtocolWrite::WRITE_EXTENSION);
           break;
 
         } else {
-          // Break or loop? Might do an ifelse based on size of the
-          // write buffer. Also the write buffer is relatively large.
-          m_up->set_state(ProtocolWrite::IDLE);
-          break;
+          if (!m_up->buffer()->consume(m_up->throttle()->node_used_unthrottled(write_stream_throws(m_up->buffer()->position(), m_up->buffer()->remaining()))))
+            return;
+
+          m_up->buffer()->reset();
+
+          if (m_up->last_command() == ProtocolBase::PIECE) {
+            // Header already sent with other messages; payload only below.
+            load_up_chunk();
+            m_up->set_state(ProtocolWrite::WRITE_PIECE);
+
+          } else if (m_up->last_command() == ProtocolBase::EXTENSION_PROTOCOL) {
+            m_up->set_state(ProtocolWrite::WRITE_EXTENSION);
+            break;
+
+          } else {
+            // Break or loop? Might do an ifelse based on size of the
+            // write buffer. Also the write buffer is relatively large.
+            m_up->set_state(ProtocolWrite::IDLE);
+            break;
+          }
         }
 
 	[[fallthrough]];
       case ProtocolWrite::WRITE_PIECE:
+        // up_chunk resets the protocol buffer when the header is fully drained.
         if (!up_chunk())
           return;
 

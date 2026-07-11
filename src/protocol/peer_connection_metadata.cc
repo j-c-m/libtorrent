@@ -309,18 +309,25 @@ PeerConnectionMetadata::event_write() {
 
 	[[fallthrough]];
       case ProtocolWrite::MSG:
-        if (!m_up->buffer()->consume(m_up->throttle()->node_used_unthrottled(write_stream_throws(m_up->buffer()->position(),
-                                                                                                 m_up->buffer()->remaining()))))
-          return;
+        // Only coalesce when the buffer is exactly the extension header.
+        if (m_up->last_command() == ProtocolBase::EXTENSION_PROTOCOL &&
+            m_up->buffer()->remaining() == ProtocolBase::sizeof_extension) {
+          m_up->set_state(ProtocolWrite::WRITE_EXTENSION);
+          // Fall through: WRITE_EXTENSION owns header+body writev and buffer reset.
+        } else {
+          if (!m_up->buffer()->consume(m_up->throttle()->node_used_unthrottled(write_stream_throws(m_up->buffer()->position(),
+                                                                                                   m_up->buffer()->remaining()))))
+            return;
 
-        m_up->buffer()->reset();
+          m_up->buffer()->reset();
 
-        if (m_up->last_command() != ProtocolBase::EXTENSION_PROTOCOL) {
-          m_up->set_state(ProtocolWrite::IDLE);
-          break;
+          if (m_up->last_command() != ProtocolBase::EXTENSION_PROTOCOL) {
+            m_up->set_state(ProtocolWrite::IDLE);
+            break;
+          }
+
+          m_up->set_state(ProtocolWrite::WRITE_EXTENSION);
         }
-
-        m_up->set_state(ProtocolWrite::WRITE_EXTENSION);
 
 	[[fallthrough]];
       case ProtocolWrite::WRITE_EXTENSION:

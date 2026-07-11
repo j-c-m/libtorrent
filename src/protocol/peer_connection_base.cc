@@ -704,45 +704,134 @@ PeerConnectionBase::up_chunk() {
   if (!m_upChunk.chunk()->is_readable())
     throw internal_error("ProtocolChunk::write_part() chunk not readable, permission denided");
 
+  // PIECE header still in the protocol buffer: full header for writev coalesce, or
+  // a residual after a short write mid-header. Never larger than sizeof_piece.
+  // Header is unthrottled (stock MSG wrote it before body quota).
+  uint32_t header_len = 0;
+  void*    header_ptr = nullptr;
+
+  if (m_up->last_command() == ProtocolBase::PIECE) {
+    uint32_t rem = m_up->buffer()->remaining();
+
+    if (rem > 0 && rem <= ProtocolBase::sizeof_piece) {
+      header_ptr = m_up->buffer()->position();
+      header_len = rem;
+    }
+  }
+
   uint32_t quota = m_up->throttle()->node_quota(m_peerChunks.upload_throttle());
 
-  if (quota == 0) {
+  // Pure writev coalesce defers the header into WRITE_PIECE. Stock always
+  // flushed that header on the unthrottled MSG path first. If we have no body
+  // quota yet, still send any remaining header so PE-plain/handshake and plain
+  // peers do not stall on an unfinished PIECE message.
+  if (quota == 0 && header_len == 0) {
     this_thread::poll()->remove_write(this);
     m_up->throttle()->node_deactivate(m_peerChunks.upload_throttle());
     return false;
   }
 
-  uint32_t bytesTransfered = 0;
+  uint32_t payload_want = quota == 0 ? 0 : std::min(quota, m_upPiece.length());
+
+  // Header-only (no body quota yet): unthrottled write matching stock MSG.
+  if (payload_want == 0) {
+    if (header_len == 0)
+      throw internal_error("PeerConnectionBase::up_chunk() no quota and no header.");
+
+    struct iovec iov;
+    iov.iov_base = header_ptr;
+    iov.iov_len  = header_len;
+
+    uint32_t bytes_written = write_streamv_throws(&iov, 1);
+
+    if (bytes_written == 0)
+      return false;
+
+    m_up->throttle()->node_used_unthrottled(bytes_written);
+    m_up->buffer()->consume(bytes_written);
+
+    if (m_up->buffer()->remaining() == 0)
+      m_up->buffer()->reset();
+
+    this_thread::poll()->remove_write(this);
+    m_up->throttle()->node_deactivate(m_peerChunks.upload_throttle());
+    return false;
+  }
+
+  // Cap how many mmap spans we gather per writev; leftover continues next poll.
+  static constexpr int max_iov = 16;
+  struct iovec iov[max_iov];
+  int iovcnt = 0;
+
+  if (header_len > 0) {
+    iov[iovcnt].iov_base = header_ptr;
+    iov[iovcnt].iov_len  = header_len;
+    iovcnt++;
+  }
 
   if (is_encrypted()) {
     // Prepare as many bytes as quota specifies, up to end of piece or
-    // buffer. Only bytes beyond remaining() are new and will be
-    // encrypted.
-    quota = up_chunk_encrypt(std::min(quota, m_upPiece.length()));
+    // buffer. Only bytes beyond remaining() are new and will be encrypted.
+    payload_want = up_chunk_encrypt(payload_want);
 
-    bytesTransfered = write_stream_throws(m_encryptBuffer->position(), quota);
-    m_encryptBuffer->consume(bytesTransfered);
+    if (payload_want > 0) {
+      iov[iovcnt].iov_base = m_encryptBuffer->position();
+      iov[iovcnt].iov_len  = payload_want;
+      iovcnt++;
+    }
 
-  } else {
-    Chunk::data_type data;
-    ChunkIterator itr(m_upChunk.chunk(), m_upPiece.offset(), m_upPiece.offset() + std::min(quota, m_upPiece.length()));
+  } else if (payload_want > 0) {
+    ChunkIterator itr(m_upChunk.chunk(), m_upPiece.offset(), m_upPiece.offset() + payload_want);
+    uint32_t left = payload_want;
 
-    do {
-      data = itr.data();
-      data.second = write_stream_throws(data.first, data.second);
+    while (!itr.empty() && left > 0 && iovcnt < max_iov) {
+      Chunk::data_type data = itr.data();
+      uint32_t take = std::min<uint32_t>(left, data.second);
 
-      bytesTransfered += data.second;
+      iov[iovcnt].iov_base = data.first;
+      iov[iovcnt].iov_len  = take;
+      iovcnt++;
 
-    } while (data.second != 0 && itr.forward(data.second));
+      left -= take;
+
+      if (!itr.forward(take))
+        break;
+    }
   }
 
-  m_up->throttle()->node_used(m_peerChunks.upload_throttle(), bytesTransfered);
-  m_download->info()->mutable_up_rate()->insert(bytesTransfered);
+  if (iovcnt == 0)
+    throw internal_error("PeerConnectionBase::up_chunk() nothing to write.");
 
-  // Just modifying the piece to cover the remaining data ends up
-  // being much cleaner and we avoid an unnessesary position variable.
-  m_upPiece.set_offset(m_upPiece.offset() + bytesTransfered);
-  m_upPiece.set_length(m_upPiece.length() - bytesTransfered);
+  uint32_t bytes_written = write_streamv_throws(iov, iovcnt);
+
+  if (bytes_written == 0)
+    return false;
+
+  // Header was historically written from MSG (unthrottled); payload uses upload throttle.
+  uint32_t header_written = std::min(bytes_written, header_len);
+  if (header_written > 0) {
+    m_up->throttle()->node_used_unthrottled(header_written);
+    m_up->buffer()->consume(header_written);
+  }
+
+  uint32_t payload_written = bytes_written - header_written;
+  if (payload_written > m_upPiece.length())
+    payload_written = m_upPiece.length();
+
+  if (payload_written > 0) {
+    if (is_encrypted())
+      m_encryptBuffer->consume(payload_written);
+
+    m_up->throttle()->node_used(m_peerChunks.upload_throttle(), payload_written);
+    m_download->info()->mutable_up_rate()->insert(payload_written);
+
+    m_upPiece.set_offset(m_upPiece.offset() + payload_written);
+    m_upPiece.set_length(m_upPiece.length() - payload_written);
+  }
+
+  // Keep buffer ready for fill_write_buffer once the header is fully gone.
+  if (m_up->buffer()->remaining() == 0)
+    m_up->buffer()->reset();
 
   return m_upPiece.length() == 0;
 }
@@ -763,14 +852,58 @@ PeerConnectionBase::up_extension() {
     m_extensionOffset = 0;
   }
 
-  if (m_extensionOffset >= m_extensionMessage.length())
+  if (m_extensionOffset > m_extensionMessage.length())
     throw internal_error("PeerConnectionBase::up_extension bad offset.");
 
-  uint32_t written = write_stream_throws(m_extensionMessage.data() + m_extensionOffset, m_extensionMessage.length() - m_extensionOffset);
-  m_up->throttle()->node_used_unthrottled(written);
-  m_extensionOffset += written;
+  // Extension header still in the protocol buffer for writev coalesce / mid-header resume
+  // (same idea as PIECE in up_chunk).
+  uint32_t header_len = 0;
+  void*    header_ptr = nullptr;
 
-  if (m_extensionOffset < m_extensionMessage.length())
+  if (m_up->last_command() == ProtocolBase::EXTENSION_PROTOCOL) {
+    uint32_t rem = m_up->buffer()->remaining();
+
+    if (rem > 0 && rem <= ProtocolBase::sizeof_extension) {
+      header_ptr = m_up->buffer()->position();
+      header_len = rem;
+    }
+  }
+
+  uint32_t body_len = m_extensionMessage.length() - m_extensionOffset;
+
+  struct iovec iov[2];
+  int iovcnt = 0;
+
+  if (header_len > 0) {
+    iov[iovcnt].iov_base = header_ptr;
+    iov[iovcnt].iov_len  = header_len;
+    iovcnt++;
+  }
+
+  if (body_len > 0) {
+    iov[iovcnt].iov_base = m_extensionMessage.data() + m_extensionOffset;
+    iov[iovcnt].iov_len  = body_len;
+    iovcnt++;
+  }
+
+  if (iovcnt == 0)
+    throw internal_error("PeerConnectionBase::up_extension() nothing to write.");
+
+  // Header and body were both unthrottled on the old MSG + up_extension path.
+  uint32_t written = write_streamv_throws(iov, iovcnt);
+  m_up->throttle()->node_used_unthrottled(written);
+
+  uint32_t header_written = std::min(written, header_len);
+  if (header_written > 0)
+    m_up->buffer()->consume(header_written);
+
+  uint32_t body_written = written - header_written;
+  m_extensionOffset += body_written;
+
+  if (m_up->buffer()->remaining() == 0)
+    m_up->buffer()->reset();
+
+  if (m_up->buffer()->remaining() != 0 || m_extensionOffset < m_extensionMessage.length())
     return false;
 
   m_extensionMessage.clear();

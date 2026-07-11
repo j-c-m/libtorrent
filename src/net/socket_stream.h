@@ -3,6 +3,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #include "torrent/event.h"
 #include "torrent/exceptions.h"
@@ -15,12 +16,14 @@ public:
 
   int                 read_stream(void* buf, uint32_t length);
   int                 write_stream(const void* buf, uint32_t length);
+  int                 write_streamv(const struct iovec* iov, int iovcnt);
 
-  // Returns the number of bytes read, or zero if the socket is
+  // Returns the number of bytes read/written, or zero if the socket is
   // blocking. On errors or closed sockets it will throw an
   // appropriate exception.
   uint32_t            read_stream_throws(void* buf, uint32_t length);
   uint32_t            write_stream_throws(const void* buf, uint32_t length);
+  uint32_t            write_streamv_throws(const struct iovec* iov, int iovcnt);
 
   // Handles all the error catching etc. Returns true if the buffer is
   // finished reading/writing.
@@ -57,12 +60,30 @@ SocketStream::read_stream(void* buf, uint32_t length) {
   return ::recv(m_fileDesc, buf, length, 0);
 }
 
+// Single-buffer write as a one-entry writev (same path as multi-iov uploads).
 inline int
 SocketStream::write_stream(const void* buf, uint32_t length) {
-  if (length == 0)
-    throw internal_error("Tried to write to buffer length 0.");
+  struct iovec iov;
+  // POSIX iovec::iov_base is void*, not const void*; writev only reads the memory.
+  iov.iov_base = const_cast<void*>(buf);
+  iov.iov_len  = length;
+  return write_streamv(&iov, 1);
+}
 
-  return ::send(m_fileDesc, buf, length, 0);
+// Low-level gather write. May throw on empty iov (programmer error) only.
+inline int
+SocketStream::write_streamv(const struct iovec* iov, int iovcnt) {
+  if (iovcnt <= 0)
+    throw internal_error("Tried to writev with invalid iovcnt.");
+
+  size_t total = 0;
+  for (int i = 0; i < iovcnt; i++)
+    total += iov[i].iov_len;
+
+  if (total == 0)
+    throw internal_error("Tried to writev with total length 0.");
+
+  return ::writev(m_fileDesc, iov, iovcnt);
 }
 
 } // namespace torrent
