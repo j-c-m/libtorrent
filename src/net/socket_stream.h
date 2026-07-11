@@ -17,6 +17,8 @@ public:
   int                 read_stream(void* buf, uint32_t length);
   int                 write_stream(const void* buf, uint32_t length);
   int                 write_streamv(const struct iovec* iov, int iovcnt);
+  int                 write_sendfile(int in_fd, uint64_t offset, uint32_t length,
+                                     const void* header, uint32_t header_len);
 
   // Returns the number of bytes read/written, or zero if the socket is
   // blocking. On errors or closed sockets it will throw an
@@ -24,6 +26,9 @@ public:
   uint32_t            read_stream_throws(void* buf, uint32_t length);
   uint32_t            write_stream_throws(const void* buf, uint32_t length);
   uint32_t            write_streamv_throws(const struct iovec* iov, int iovcnt);
+  // Total bytes = header + file (same split as writev for accounting).
+  uint32_t            write_sendfile_throws(int in_fd, uint64_t offset, uint32_t length,
+                                            const void* header, uint32_t header_len);
 
   // Handles all the error catching etc. Returns true if the buffer is
   // finished reading/writing.

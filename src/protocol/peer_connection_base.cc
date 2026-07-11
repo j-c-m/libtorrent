@@ -3,6 +3,8 @@
 #include "peer_connection_base.h"
 
 #include <cstdio>
+#include <cstring>
+#include <limits>
 
 #include "manager.h"
 #include "data/chunk_iterator.h"
@@ -315,6 +317,20 @@ PeerConnectionBase::load_up_chunk() {
     return;
   }
 
+  ChunkManager* cm = manager->chunk_manager();
+
+  // Plaintext sendfile: resolve file fd without mmap when possible.
+  if (!is_encrypted() && cm->use_sendfile()) {
+    auto region = m_download->file_list()->at_file(
+      m_download->file_list()->chunk_index_position(m_upPiece.index()) + m_upPiece.offset(),
+      m_upPiece.length());
+
+    if (region.is_valid()) {
+      up_chunk_release();
+      return;
+    }
+  }
+
   up_chunk_release();
 
   m_upChunk = m_download->chunk_list()->get(m_upPiece.index(), ChunkList::get_not_hashing);
@@ -336,7 +352,6 @@ PeerConnectionBase::load_up_chunk() {
 
   // Also check if we've already preloaded in the recent past, even
   // past unmaps.
-  ChunkManager* cm = manager->chunk_manager();
   uint32_t preloadSize = m_upChunk.chunk()->chunk_size() - m_upPiece.offset();
 
   if (cm->preload_type() == 0 ||
@@ -701,10 +716,7 @@ PeerConnectionBase::up_chunk() {
   if (!m_up->throttle()->is_throttled(m_peerChunks.upload_throttle()))
     throw internal_error("PeerConnectionBase::up_chunk() tried to write a piece but is not in throttle list");
 
-  if (!m_upChunk.chunk()->is_readable())
-    throw internal_error("ProtocolChunk::write_part() chunk not readable, permission denided");
-
-  // PIECE header still in the protocol buffer: full header for writev coalesce, or
+  // PIECE header still in the protocol buffer: full header for coalesce, or
   // a residual after a short write mid-header. Never larger than sizeof_piece.
   // Header is unthrottled (stock MSG wrote it before body quota).
   uint32_t header_len = 0;
@@ -721,10 +733,10 @@ PeerConnectionBase::up_chunk() {
 
   uint32_t quota = m_up->throttle()->node_quota(m_peerChunks.upload_throttle());
 
-  // Pure writev coalesce defers the header into WRITE_PIECE. Stock always
-  // flushed that header on the unthrottled MSG path first. If we have no body
-  // quota yet, still send any remaining header so PE-plain/handshake and plain
-  // peers do not stall on an unfinished PIECE message.
+  // Pure writev/sendfile coalesce defers the header into WRITE_PIECE. Stock
+  // always flushed that header on the unthrottled MSG path first. If we have
+  // no body quota yet, still send any remaining header so PE-plain/handshake
+  // and plain peers do not stall on an unfinished PIECE message.
   if (quota == 0 && header_len == 0) {
     this_thread::poll()->remove_write(this);
     m_up->throttle()->node_deactivate(m_peerChunks.upload_throttle());
@@ -732,8 +744,9 @@ PeerConnectionBase::up_chunk() {
   }
 
   uint32_t payload_want = quota == 0 ? 0 : std::min(quota, m_upPiece.length());
+  ChunkManager* cm = manager->chunk_manager();
 
-  // Header-only (no body quota yet): unthrottled write matching stock MSG.
+  // Header-only (no body quota yet): unthrottled write, no mmap/sendfile needed.
   if (payload_want == 0) {
     if (header_len == 0)
       throw internal_error("PeerConnectionBase::up_chunk() no quota and no header.");
@@ -757,6 +770,69 @@ PeerConnectionBase::up_chunk() {
     m_up->throttle()->node_deactivate(m_peerChunks.upload_throttle());
     return false;
   }
+
+#ifdef HAVE_SENDFILE
+  // Plaintext file-backed upload: sendfile with optional PIECE header.
+  if (!is_encrypted() && cm->use_sendfile() && payload_want > 0) {
+    auto region = m_download->file_list()->at_file(
+      m_download->file_list()->chunk_index_position(m_upPiece.index()) + m_upPiece.offset(),
+      payload_want);
+
+    if (region.is_valid() &&
+        region.offset <= (uint64_t)std::numeric_limits<off_t>::max()) {
+      uint32_t bytes_written = write_sendfile_throws(region.fd, region.offset, region.length,
+                                                     header_ptr, header_len);
+
+      if (bytes_written == 0)
+        return false;
+
+      // Header unthrottled (MSG); payload throttled. bytes_written is logical
+      // total (header + body) on all platforms.
+      uint32_t header_written = std::min(bytes_written, header_len);
+      if (header_written > 0) {
+        m_up->throttle()->node_used_unthrottled(header_written);
+        m_up->buffer()->consume(header_written);
+      }
+
+      uint32_t payload_written = bytes_written - header_written;
+      if (payload_written > m_upPiece.length())
+        payload_written = m_upPiece.length();
+
+      if (payload_written > 0) {
+        m_up->throttle()->node_used(m_peerChunks.upload_throttle(), payload_written);
+        m_download->info()->mutable_up_rate()->insert(payload_written);
+
+        m_upPiece.set_offset(m_upPiece.offset() + payload_written);
+        m_upPiece.set_length(m_upPiece.length() - payload_written);
+        cm->inc_stats_sendfile();
+      }
+
+      if (m_up->buffer()->remaining() == 0)
+        m_up->buffer()->reset();
+
+      return m_upPiece.length() == 0;
+    }
+
+    cm->inc_stats_sendfile_fallback();
+  }
+#endif
+
+  // writev path (encrypted, sendfile off/fallback, or padding/multi-file).
+  if (!m_upChunk.is_valid() || m_upChunk.index() != m_upPiece.index()) {
+    up_chunk_release();
+    m_upChunk = m_download->chunk_list()->get(m_upPiece.index(), ChunkList::get_not_hashing);
+
+    if (!m_upChunk.is_valid())
+      throw storage_error("File chunk read error: " + std::string(std::strerror(m_upChunk.error_number())));
+
+    if (is_encrypted() && m_encryptBuffer == nullptr) {
+      m_encryptBuffer = std::make_unique<EncryptBuffer>();
+      m_encryptBuffer->reset();
+    }
+  }
+
+  if (!m_upChunk.chunk()->is_readable())
+    throw internal_error("ProtocolChunk::write_part() chunk not readable, permission denided");
 
   // Cap how many mmap spans we gather per writev; leftover continues next poll.
   static constexpr int max_iov = 16;
@@ -807,7 +883,7 @@ PeerConnectionBase::up_chunk() {
   if (bytes_written == 0)
     return false;
 
-  // Header was historically written from MSG (unthrottled); payload uses upload throttle.
+  // Header unthrottled (MSG); payload uses upload throttle.
   uint32_t header_written = std::min(bytes_written, header_len);
   if (header_written > 0) {
     m_up->throttle()->node_used_unthrottled(header_written);

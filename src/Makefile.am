@@ -98,6 +98,8 @@ libtorrent_other_la_SOURCES = \
 	net/socket_datagram.h \
 	net/socket_stream.cc \
 	net/socket_stream.h \
+	net/sendfile_stream.cc \
+	net/sendfile_stream.h \
 	net/thread_net.cc \
 	net/thread_net.h \
 	net/throttle_internal.cc \
