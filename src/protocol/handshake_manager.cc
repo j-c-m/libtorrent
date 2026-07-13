@@ -228,6 +228,9 @@ HandshakeManager::receive_succeeded(Handshake* ptr) {
     };
 
   if (!download->info()->is_active()) {
+    // Fix race: inactive drop must not arm connect_filter_recent for 600s.
+    if (handshake->peer_info() != nullptr)
+      handshake->peer_info()->set_last_handshake(0);
     error_func(e_handshake_inactive_download);
     handshake->destroy_connection();
     return;
@@ -286,6 +289,10 @@ HandshakeManager::receive_failed(Handshake* ptr, int message, int error) {
 
   auto handshake = find_and_erase(ptr);
   auto sa        = handshake->socket_address();
+
+  // Fix race: same as receive_succeeded.
+  if (error == e_handshake_inactive_download && handshake->peer_info() != nullptr)
+    handshake->peer_info()->set_last_handshake(0);
 
   handshake->destroy_connection();
 
