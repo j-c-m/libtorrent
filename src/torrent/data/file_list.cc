@@ -359,7 +359,7 @@ struct file_list_cstr_less {
 };
 
 void
-FileList::open(bool hashing, int flags) {
+FileList::open(int flags) {
   using path_set = std::set<const char*, file_list_cstr_less>;
 
   LT_LOG_FL(INFO, "Opening.", 0);
@@ -407,12 +407,13 @@ FileList::open(bool hashing, int flags) {
       if (entry->path()->empty())
         throw storage_error("Empty filename is not allowed.");
 
-      // Handle directory creation outside of open_file, so we can do
-      // it here if necessary.
+      // Path/dir setup for all files (including priority-off). open_file does
+      // not open FDs; prepare() opens on demand. Off files are not create-queued
+      // (see Download::open / File::set_priority).
 
       entry->set_flags_protected(File::flag_active);
 
-      if (!open_file(&*entry, lastPath, hashing, flags)) {
+      if (!open_file(&*entry, lastPath, flags)) {
         // This needs to check if the error was due to open_no_create
         // being set or not.
         if (!(flags & open_no_create))
@@ -519,7 +520,7 @@ FileList::make_directory(Path::const_iterator pathBegin, Path::const_iterator pa
 }
 
 bool
-FileList::open_file(File* file_node, const Path& lastPath, bool hashing, int flags) {
+FileList::open_file(File* file_node, const Path& lastPath, int flags) {
   errno = 0;
 
   if (!(flags & open_no_create)) {
@@ -552,7 +553,9 @@ FileList::open_file(File* file_node, const Path& lastPath, bool hashing, int fla
     return false;
   }
 
-  return file_node->prepare(hashing, MemoryChunk::prot_read, 0);
+  // Bulk open only sets up paths/dirs. Missing files are fine; first chunk
+  // I/O prepare() creates/opens on demand (including create_queued/resize).
+  return true;
 }
 
 MemoryChunk
@@ -567,6 +570,11 @@ FileList::create_chunk_part(FileList::iterator itr, uint64_t offset, uint32_t le
     throw internal_error("FileList::chunk_part(...) caught a negative offset", data()->hash());
 
   // Check that offset != length of file.
+
+  // Off files are not bulk-created. When writing a wanted boundary piece we
+  // must still be able to create/resize the off neighbor's shared extent.
+  if ((*itr)->priority() == PRIORITY_OFF && (prot & MemoryChunk::prot_write))
+    (*itr)->set_flags(File::flag_create_queued | File::flag_resize_queued);
 
   if (!(*itr)->prepare(hashing, prot, 0))
     return MemoryChunk();
@@ -731,7 +739,7 @@ FileList::reset_filesize(int64_t size) {
   m_data.mutable_completed_bitfield()->allocate();
   m_data.mutable_completed_bitfield()->unset_all();
 
-  open(false, open_no_create);
+  open(open_no_create);
 }
 
 } // namespace torrent

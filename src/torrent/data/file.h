@@ -57,7 +57,7 @@ public:
   uint32_t            range_second() const                     { return m_range.second; }
 
   priority_enum       priority() const                         { return m_priority; }
-  void                set_priority(priority_enum t)            { m_priority = t; }
+  void                set_priority(priority_enum t);
 
   const Path*         path() const                             { return &m_path; }
   Path*               mutable_path()                           { return &m_path; }
@@ -104,6 +104,7 @@ private:
   File(const File&) = delete;
   File& operator=(const File&) = delete;
 
+  bool                ensure_size_for_write();
   bool                resize_file() const;
 
   int                 m_fd{-1};
