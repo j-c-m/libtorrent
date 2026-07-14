@@ -333,10 +333,19 @@ DownloadWrapper::receive_update_priorities() {
     }
   }
 
-  bool was_partial = data()->wanted_chunks() != 0;
+  uint32_t old_wanted = data()->wanted_chunks();
+  bool was_partial = old_wanted != 0;
   data()->update_wanted_chunks();
 
   m_main->chunk_selector()->update_priorities();
+
+  // When wanted work increases, refill the dial queue from known peers and
+  // connect. Otherwise recent-handshake cooldown leaves available_list empty
+  // while the tracker still reports seeders.
+  if (info()->is_active() && data()->wanted_chunks() > old_wanted) {
+    m_main->peer_list()->requeue_disconnected_peers();
+    m_main->receive_connect_peers();
+  }
 
   for (const auto& peer : *m_main->connection_list()) {
     peer->m_ptr()->update_interested();

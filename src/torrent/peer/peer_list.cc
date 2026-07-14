@@ -332,7 +332,7 @@ PeerList::disconnected(iterator itr, int flags) {
 
   // Replace the socket address port with the listening port so that
   // future outgoing connections will connect to the right port.
-  itr->second->set_port(0);
+  itr->second->set_port(itr->second->listen_port());
 
   if (flags & disconnect_set_time)
     itr->second->set_last_connection(this_thread::cached_seconds().count());
@@ -342,6 +342,30 @@ PeerList::disconnected(iterator itr, int flags) {
 
   // Do magic to get rid of unneeded entries.
   return ++itr;
+}
+
+void
+PeerList::requeue_disconnected_peers() {
+  uint32_t requeued = 0;
+
+  for (auto& entry : *this) {
+    PeerInfo* peer_info = entry.second.get();
+
+    if (peer_info->is_connected() || peer_info->is_handshake())
+      continue;
+
+    if (peer_info->listen_port() == 0 || peer_info->is_unwanted())
+      continue;
+
+    peer_info->set_port(peer_info->listen_port());
+    peer_info->set_last_handshake(0);
+
+    if (m_available_list->insert_unique(peer_info->socket_address()))
+      requeued++;
+  }
+
+  LT_LOG_EVENTS("requeued disconnected peers requeued:%" PRIu32 " available:%" PRIuPTR,
+                requeued, m_available_list->size());
 }
 
 uint32_t

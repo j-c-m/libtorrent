@@ -60,6 +60,10 @@ public:
   // This will be used internally only for the moment.
   uint32_t            insert_available(const void* al) LIBTORRENT_NO_EXPORT;
 
+  // Re-add known disconnected peers to the dial queue (e.g. after wanted
+  // priorities increase). Clears recent-handshake block for those peers only.
+  void                requeue_disconnected_peers() LIBTORRENT_NO_EXPORT;
+
   static ipv4_table*  ipv4_filter()     { return &m_ipv4_table; }
 
   const auto&         available_list()  { return m_available_list; }
