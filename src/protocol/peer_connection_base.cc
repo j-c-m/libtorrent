@@ -1108,8 +1108,8 @@ PeerConnectionBase::try_request_pieces() {
 
   uint32_t pipeSize = request_list()->calculate_pipe_size(m_peerChunks.download_throttle()->rate()->rate());
 
-  // Don't start requesting if we can't do it in large enough chunks.
-  if (request_list()->pipe_size() >= (pipeSize + 10) / 2)
+  // Refill whenever we are under the target pipe (no half-pipe hysteresis).
+  if (request_list()->pipe_size() >= pipeSize)
     return false;
 
   bool success = false;

@@ -331,17 +331,25 @@ RequestList::calculate_pipe_size(uint32_t rate) {
   // Change into KB.
   rate /= 1024;
 
+  uint32_t pipe;
+
   if (!m_delegator->get_aggressive()) {
     if (rate < 20)
-      return rate + 2;
+      pipe = rate + 2;
     else
-      return rate / 5 + 18;
+      pipe = rate / 5 + 18;
+
+    // Floor so cold peers keep more than two 16 KiB blocks in flight.
+    return std::max(pipe, uint32_t{8});
 
   } else {
     if (rate < 10)
-      return rate / 5 + 1;
+      pipe = rate / 5 + 1;
     else
-      return rate / 10 + 2;
+      pipe = rate / 10 + 2;
+
+    // Soft floor in endgame; still tighter than normal mode.
+    return std::max(pipe, uint32_t{4});
   }
 }
 
