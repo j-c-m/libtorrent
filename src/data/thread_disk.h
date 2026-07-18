@@ -1,6 +1,10 @@
 #ifndef LIBTORRENT_DATA_THREAD_DISK_H
 #define LIBTORRENT_DATA_THREAD_DISK_H
 
+#include <deque>
+#include <mutex>
+#include <utility>
+
 #include "data/hash_check_queue.h"
 #include "torrent/common.h"
 #include "torrent/system/thread.h"
@@ -19,6 +23,9 @@ public:
 
   HashCheckQueue* hash_check_queue() { return &m_hash_check_queue; }
 
+  // Caller has dropped ownership of the mapping; disk does MS_ASYNC + munmap.
+  void            queue_munmap(void* ptr, size_t length);
+
   void            init_thread() override;
   void            cleanup_thread() override;
 
@@ -28,9 +35,14 @@ private:
   void                      call_events() override;
   std::chrono::microseconds next_timeout() override;
 
+  void            perform_munmaps();
+
   static ThreadDisk* m_thread_disk;
 
   HashCheckQueue  m_hash_check_queue;
+
+  std::mutex                             m_munmap_lock;
+  std::deque<std::pair<void*, size_t>>   m_munmaps;
 };
 
 inline ThreadDisk* thread_disk() {
