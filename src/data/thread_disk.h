@@ -4,6 +4,7 @@
 #include <deque>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "data/hash_check_queue.h"
 #include "torrent/common.h"
@@ -26,6 +27,10 @@ public:
   // Caller has dropped ownership of the mapping; disk does MS_ASYNC + munmap.
   void            queue_munmap(void* ptr, size_t length);
 
+  // Detach on main first, then queue the raw fd here. Disk thread owns ::close.
+  void            queue_close_fd(int fd);
+  void            queue_close_fds(const std::vector<int>& fds);
+
   void            init_thread() override;
   void            cleanup_thread() override;
 
@@ -36,6 +41,7 @@ private:
   std::chrono::microseconds next_timeout() override;
 
   void            perform_munmaps();
+  void            perform_close_fds();
 
   static ThreadDisk* m_thread_disk;
 
@@ -43,6 +49,9 @@ private:
 
   std::mutex                             m_munmap_lock;
   std::deque<std::pair<void*, size_t>>   m_munmaps;
+
+  std::mutex      m_close_fds_lock;
+  std::deque<int> m_close_fds;
 };
 
 inline ThreadDisk* thread_disk() {

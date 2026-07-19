@@ -6,13 +6,31 @@
 #include <cassert>
 #include <fcntl.h>
 #include <limits>
+#include <unistd.h>
 
 #include "manager.h"
 #include "data/socket_file.h"
+#include "data/thread_disk.h"
 #include "torrent/exceptions.h"
 #include "torrent/data/file.h"
 
 namespace torrent {
+
+namespace {
+
+void
+close_file_descriptor(int fd) {
+  if (fd < 0)
+    return;
+
+  // Prefer the disk thread so main/UI is not blocked on slow FS close.
+  if (ThreadDisk* disk = thread_disk(); disk != nullptr && disk->is_active())
+    disk->queue_close_fd(fd);
+  else
+    ::close(fd);
+}
+
+} // namespace
 
 FileManager::~FileManager() {
   assert(empty() && "FileManager::~FileManager() called but empty() != true.");
@@ -71,15 +89,12 @@ FileManager::open(value_type file, [[maybe_unused]] bool hashing, int prot, int 
   return true;
 }
 
-void
-FileManager::close(value_type file) {
-  if (!file->is_open())
-    return;
+int
+FileManager::release(value_type file) {
+  if (file == nullptr || !file->is_open() || file->is_padding())
+    return -1;
 
-  if (file->is_padding())
-    return;
-
-  SocketFile(file->file_descriptor()).close();
+  int fd = file->file_descriptor();
 
   file->set_protection(0);
   file->set_file_descriptor(-1);
@@ -87,12 +102,43 @@ FileManager::close(value_type file) {
   auto itr = std::find(begin(), end(), file);
 
   if (itr == end())
-    throw internal_error("FileManager::close_file(...) itr == end().");
+    throw internal_error("FileManager::release(...) itr == end().");
 
   *itr = back();
   base_type::pop_back();
 
   m_files_closed_counter++;
+  return fd;
+}
+
+void
+FileManager::close(value_type file) {
+  close_file_descriptor(release(file));
+}
+
+void
+FileManager::close_files(const std::vector<value_type>& files) {
+  if (files.empty())
+    return;
+
+  std::vector<int> fds;
+  fds.reserve(files.size());
+
+  for (value_type file : files) {
+    int fd = release(file);
+
+    if (fd >= 0)
+      fds.push_back(fd);
+  }
+
+  if (fds.empty())
+    return;
+
+  if (ThreadDisk* disk = thread_disk(); disk != nullptr && disk->is_active())
+    disk->queue_close_fds(fds);
+  else
+    for (int fd : fds)
+      ::close(fd);
 }
 
 void

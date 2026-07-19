@@ -2,6 +2,7 @@
 #define LIBTORRENT_DATA_FILE_MANAGER_H
 
 #include <vector>
+
 #include <torrent/common.h>
 
 namespace torrent {
@@ -43,6 +44,11 @@ public:
 
   bool                open(value_type file, bool hashing, int prot, int flags);
   void                close(value_type file);
+
+  // Detach open file bookkeeping and return the fd (or -1). Caller owns close.
+  int                 release(value_type file);
+  // Detach many files and queue their fds for close on the disk thread.
+  void                close_files(const std::vector<value_type>& files);
 
   void                close_least_active();
   void                periodic_close_idle();

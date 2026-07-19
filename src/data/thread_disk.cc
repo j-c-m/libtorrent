@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "thread_main.h"
 #include "data/hash_queue.h"
@@ -49,11 +50,13 @@ ThreadDisk::init_thread() {
 
 void
 ThreadDisk::cleanup_thread() {
-  // Drain pending unmaps so we do not leak mappings at shutdown.
+  // Drain pending storage teardown so we do not leak at shutdown.
   perform_munmaps();
+  perform_close_fds();
 
   assert(m_hash_check_queue.empty() && "ThreadDisk::cleanup_thread(): m_hash_check_queue not empty.");
   assert(m_munmaps.empty() && "ThreadDisk::cleanup_thread(): m_munmaps not empty.");
+  assert(m_close_fds.empty() && "ThreadDisk::cleanup_thread(): m_close_fds not empty.");
 }
 
 void
@@ -64,6 +67,32 @@ ThreadDisk::queue_munmap(void* ptr, size_t length) {
   {
     auto lock = std::lock_guard(m_munmap_lock);
     m_munmaps.emplace_back(ptr, length);
+  }
+
+  interrupt();
+}
+
+void
+ThreadDisk::queue_close_fd(int fd) {
+  if (fd < 0)
+    return;
+
+  {
+    auto lock = std::lock_guard(m_close_fds_lock);
+    m_close_fds.push_back(fd);
+  }
+
+  interrupt();
+}
+
+void
+ThreadDisk::queue_close_fds(const std::vector<int>& fds) {
+  if (fds.empty())
+    return;
+
+  {
+    auto lock = std::lock_guard(m_close_fds_lock);
+    m_close_fds.insert(m_close_fds.end(), fds.begin(), fds.end());
   }
 
   interrupt();
@@ -89,6 +118,19 @@ ThreadDisk::perform_munmaps() {
 }
 
 void
+ThreadDisk::perform_close_fds() {
+  std::deque<int> local;
+
+  {
+    auto lock = std::lock_guard(m_close_fds_lock);
+    local.swap(m_close_fds);
+  }
+
+  for (int fd : local)
+    ::close(fd);
+}
+
+void
 ThreadDisk::call_events() {
   // lt_log_print_locked(torrent::LOG_THREAD_NOTICE, "Got thread_disk tick.");
 
@@ -103,6 +145,7 @@ ThreadDisk::call_events() {
 
   m_hash_check_queue.perform();
   perform_munmaps();
+  perform_close_fds();
   process_callbacks();
 }
 
